@@ -233,8 +233,9 @@ class GooglePhotosClient:
         self.appCreds = self.appCredStore.get()
 
         if not self.appCreds or self.appCreds.invalid:
+            flags = tools.argparser.parse_args(args=[])  # tools.run_flow() will call it's own argparse so make it ignore this script's cmd line args
             flow = client.flow_from_clientsecrets(api_cred_file, scopes)
-            self.appCreds = tools.run_flow(flow, self.appCredStore)
+            self.appCreds = tools.run_flow(flow, self.appCredStore, flags)
         self.service = build('photoslibrary', 'v1', http=self.appCreds.authorize(Http()))
 
     # This will only upload photos that aren't already uploaded.
