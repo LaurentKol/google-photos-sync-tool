@@ -205,8 +205,14 @@ class PhotosSync:
             logger.debug('Photos to add to %s album: %s' % (album_name, self.photos_to_upload_per_albums[album_name]))
             logger.info('%s photos to add to %s album' % (len(self.photos_to_upload_per_albums[album_name]), album_name))
 
-            # Get album_id from album_name
-            album_id = next(album['id'] for album in self.google_photos_albums if album["title"] == album_name)
+            # Get album_id from album_name, this can fail if --pretend and album isn't created yet
+            try:
+                album_id = next(album['id'] for album in self.google_photos_albums if album["title"] == album_name)
+            except StopIteration:
+                if pretend:
+                    logger.info(f"(Expected if --pretend, otherwise means album creation failed) Album '{album_name}' does not exist yet")
+                else:
+                    logger.critical(f"Cannot find album '{album_name}' on Google Photos!")
             self.google_photos_client.add_items_to_album(self.photos_to_upload_per_albums[album_name], album_id, pretend=pretend)
 
     # TODO: should also remove photos that don't belong to album anymore relying on photo timestamp
