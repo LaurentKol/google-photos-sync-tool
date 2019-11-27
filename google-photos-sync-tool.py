@@ -45,6 +45,10 @@ from oauth2client import tools
 
 ALBUM_CONFIG_FILE = 'album-rules.yaml'
 
+# This is used to shorten filepath which is used as photos identifier (it's human readable and does not change when exifdata gets modified).
+# Not using full path allows changing photos' basedir and hides full path from Google Photos ("filename" field).
+FILENAME_STANDARIZE_REGEX = r'.*/Photos/'
+
 logger = logging.getLogger()
 
 
@@ -102,7 +106,7 @@ class PhotosSync:
                 if "IPTC:Keywords" in d and \
                         (any(keywords_regex.match(keyword) for keyword in d["IPTC:Keywords"]) or
                          (isinstance(d["IPTC:Keywords"], str) and keywords_regex.match(d["IPTC:Keywords"])))\
-                        and filePath_regex.match(d["SourceFile"]):
+                        and filePath_regex.match(re.sub(FILENAME_STANDARIZE_REGEX, '', d["SourceFile"])):
                     photos_to_upload_per_albums[album_name].add(
                         Photo(filename=d["SourceFile"], creationTime=datetime.strptime(d["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S'), keywords=d["IPTC:Keywords"]))
 
@@ -397,7 +401,7 @@ class GooglePhotosClient:
 class Photo:
     def __init__(self, filename, **kwargs):
         self.filepath = filename  # Used only for uploading
-        self.filename = re.sub(r'.*/Photos/', '', filename)  # Standardize filename, it's used as identifier / comparator
+        self.filename = re.sub(FILENAME_STANDARIZE_REGEX, '', filename)  # Standardize filename, it's used as identifier / comparator
         self.googleId = kwargs.pop('googleId', None)
         self.googleDescription = kwargs.pop('googleDescription', None)
         self.googleMetadata = kwargs.pop('googleMetadata', None)
