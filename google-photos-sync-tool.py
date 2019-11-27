@@ -130,6 +130,8 @@ class PhotosSync:
 
     def __search_google_photos_for_photos_to_upload_time_range(self):
         self.photos_already_uploaded = set()
+        if not self.photos_to_upload:
+            return  # In case no photos are to upload, don't query Google Photo API
         oldest_photo_dt, newest_photo_dt = min(self.photos_to_upload).creationTime, max(self.photos_to_upload).creationTime
         oldest_photo_dt = oldest_photo_dt - timedelta(days=1)  # HACK: some pics taken abroad have wrong timezone in exifdata but google photos override with correct timezone.
         logger.info('Listing google photos from %s to %s' % (oldest_photo_dt, newest_photo_dt))
