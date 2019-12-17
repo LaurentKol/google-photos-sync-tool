@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 """
 
-This tools is meant to sync your local photos to Google Photos, based on ALBUM_CONFIG_FILE and keywords in exifdata.
+This tool is meant to sync your local photos to Google Photos, based on ALBUM_CONFIG_FILE and keywords in exifdata.
 
 ALBUM_CONFIG_FILE format is:
-# AlbumName:
-#   Keywords: '<reg-exp>'
+# <AlbumName>:
 #   FilePath: '.*'
+#   KeywordsIncl: '<reg-exp>'
+#   KeywordsExcl: '<reg-exp>'
 
 use --noauth_local_webserver to generate credentials.json if running on a box with no browser
 
@@ -16,19 +17,20 @@ pip install -r requirements.txt to use version of modules I tested with OR take 
 pip install --upgrade google-api-python-client oauth2client PyExifTool requests pyyaml
 
 TODO: Write tests
+TODO: Make this a package
 TODO: Finish sync feature, now only upload photos and add-to/create albums but doesn't remove from album
 TODO: Some hard-coded values to clean-up
 TODO: Fix hack about wrong timezone, -1d or at make it an option
-
+TODO: Rewrite upload, add_items_to_album, remove_items_from_album from GooglePhotosClient to share batching logic
+TODO: Implement retries on API call failure
 """
 
 import argparse
 import glob
-import json
 import logging
-import os
 import re
 import sys
+import textwrap
 import time
 from datetime import datetime
 from datetime import timedelta
@@ -45,9 +47,9 @@ from oauth2client import tools
 
 ALBUM_CONFIG_FILE = 'album-rules.yaml'
 
-# This is used to shorten filepath which is used as photos identifier (it's human readable and does not change when exifdata gets modified).
+# This is used to shorten file path which is used as photos identifier (it's human readable and does not change when exifdata gets modified).
 # Not using full path allows changing photos' basedir and hides full path from Google Photos ("filename" field).
-FILENAME_STANDARIZE_REGEX = r'.*/Photos/'
+FILE_PATH_SHORTENING_REGEX = r'.*/Photos/'
 
 logger = logging.getLogger()
 
@@ -58,7 +60,6 @@ class PhotosSync:
         self.photos_already_uploaded = set()
         self.google_photos_client = GooglePhotosClient()
         self.google_photos_albums = {}
-        self.config = Config()
         self.local_photos = []
         self.local_photos_exif_data = []
         self.photos_to_upload_per_albums = {}
@@ -68,7 +69,7 @@ class PhotosSync:
         logger.debug('Listing local photos in %s ... ' % path)
         local_photos = []
         photo_iter = glob.iglob(path + '/**/*.*', recursive=True)
-        ext_re = re.compile('.*(jpg|JPG)')
+        ext_re = re.compile('.*(jpg|JPG)')  # Make this configurable
 
         for f in photo_iter:
             if ext_re.match(f):
@@ -93,22 +94,59 @@ class PhotosSync:
         logger.info('Done retrieving exif data of {2} photos in {0:.2f}s ({1:.3f}s per photo)'.format(td, (td / len(self.local_photos)), len(self.local_photos_exif_data)))
         return
 
-    def map_local_photos_to_albums(self):
-        albums_mapping = self.config.albums_mapping
-        logger.debug("albumsMapping: %s" % pformat(albums_mapping))
+    @staticmethod
+    def __normalize_to_list(obj):
+        return obj if isinstance(obj, list) else [obj]
+
+    # Check if every regexp match at least one exif keyword.
+    @staticmethod
+    def __match_all(keywords, regexps):
+        for regexp in regexps:
+            if not any(regexp.match(kw) for kw in keywords):
+                return False
+        return True
+
+    def match_local_photos_to_albums(self):
+        logger.debug("albumsMapping: %s" % pformat(config.albums_mapping))
         photos_to_upload_per_albums = {}
-        for album_name in albums_mapping.keys():
-            keywords_regex = re.compile(albums_mapping[album_name]['Keywords'])
-            filePath_regex = re.compile(albums_mapping[album_name]['FilePath'])
+        for album_name in config.albums_mapping.keys():
+            album_mapping = config.albums_mapping[album_name]
+            regexps = {}
+            if 'KeywordsIncl' in album_mapping:
+                regexps['KeywordsIncl'] = [re.compile(regex) for regex in self.__normalize_to_list(album_mapping['KeywordsIncl'])]
+            if 'KeywordsExcl' in album_mapping:
+                regexps['KeywordsExcl'] = [re.compile(regex) for regex in self.__normalize_to_list(album_mapping['KeywordsExcl'])]
+            if 'FilePath' in album_mapping:
+                regexps['FilePath'] = [re.compile(regex) for regex in self.__normalize_to_list(album_mapping['FilePath'])]
+            else:
+                logger.critical(f"No 'FilePath' defined for album '{album_name}', exiting ...")
+                sys.exit(1)
+
+            # For each photo, check if belongs to album.
             photos_to_upload_per_albums[album_name] = set()
-            for d in self.local_photos_exif_data:
-                # In some cases d["IPTC:Keywords"] stores a string and some other, a list (of string).
-                if "IPTC:Keywords" in d and \
-                        (any(keywords_regex.match(keyword) for keyword in d["IPTC:Keywords"]) or
-                         (isinstance(d["IPTC:Keywords"], str) and keywords_regex.match(d["IPTC:Keywords"])))\
-                        and filePath_regex.match(re.sub(FILENAME_STANDARIZE_REGEX, '', d["SourceFile"])):
-                    photos_to_upload_per_albums[album_name].add(
-                        Photo(filename=d["SourceFile"], creationTime=datetime.strptime(d["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S'), keywords=d["IPTC:Keywords"]))
+            for exif_data in self.local_photos_exif_data:
+                # Go to next photo if its file path doesn't match albums_mapping defined in ALBUM_CONFIG_FILE.
+                photo_file_path = re.sub(FILE_PATH_SHORTENING_REGEX, '', exif_data["SourceFile"])
+                if not self.__match_all(photo_file_path, regexps['FilePath']):
+                    continue
+
+                # Allow photo to have no Exifdata, in case only want to match against FilePath
+                if "IPTC:Keywords" not in exif_data:
+                    exif_data["IPTC:Keywords"] = ''
+
+                # Normalize into a list because d["IPTC:Keywords"] stores a string if single kw and a list of string if multiple kw
+                exif_kws = [exif_data["IPTC:Keywords"]] if isinstance(exif_data["IPTC:Keywords"], str) else exif_data["IPTC:Keywords"]
+
+                if 'KeywordsIncl' in regexps and not self.__match_all(exif_kws, regexps['KeywordsIncl']):
+                    continue
+                if 'KeywordsExcl' in regexps and self.__match_all(exif_kws, regexps['KeywordsExcl']):
+                    continue
+
+                # If we reached here, this photo belongs to album_name.
+                photos_to_upload_per_albums[album_name].add(
+                    Photo(filename=exif_data["SourceFile"],
+                          creationTime=datetime.strptime(exif_data["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S'),
+                          keywords=exif_data["IPTC:Keywords"]))
 
         logger.debug("photosToUploadPerAlbums: %s" % pformat(photos_to_upload_per_albums))
         for album in photos_to_upload_per_albums.keys():
@@ -192,7 +230,7 @@ class PhotosSync:
     def create_missing_albums(self, pretend=False):
         self.__list_google_albums()
         # Create albums if don't already exist.
-        albums_to_create = [a for a in self.config.albums_mapping.keys() if a not in [d['title'] for d in self.google_photos_albums]]
+        albums_to_create = [a for a in config.albums_mapping.keys() if a not in [d['title'] for d in self.google_photos_albums]]
 
         for album_to_create in albums_to_create:
             self.google_photos_client.create_album(album_to_create, pretend=pretend)
@@ -200,28 +238,73 @@ class PhotosSync:
         if albums_to_create:
             self.__list_google_albums()
 
+    def __get_album_id(self, album_name, pretend):
+        # Get album_id from album_name, this can fail if --pretend and album isn't created yet
+        try:
+            album_id = next(album['id'] for album in self.google_photos_albums if album["title"] == album_name)
+        except StopIteration:
+            if pretend:
+                logger.info(f"(Expected if --pretend, otherwise means album creation failed) Album '{album_name}' does not exist yet")
+            else:
+                logger.critical(f"Cannot find album '{album_name}' on Google Photos!")
+            return None
+        return album_id
+
     def add_photos_to_albums(self, pretend=False):
         for album_name in self.photos_to_upload_per_albums.keys():
             logger.debug('Photos to add to %s album: %s' % (album_name, self.photos_to_upload_per_albums[album_name]))
             logger.info('%s photos to add to %s album' % (len(self.photos_to_upload_per_albums[album_name]), album_name))
 
-            # Get album_id from album_name, this can fail if --pretend and album isn't created yet
-            try:
-                album_id = next(album['id'] for album in self.google_photos_albums if album["title"] == album_name)
-            except StopIteration:
-                if pretend:
-                    logger.info(f"(Expected if --pretend, otherwise means album creation failed) Album '{album_name}' does not exist yet")
-                else:
-                    logger.critical(f"Cannot find album '{album_name}' on Google Photos!")
+            album_id = self.__get_album_id(album_name, pretend)
             self.google_photos_client.add_items_to_album(self.photos_to_upload_per_albums[album_name], album_id, pretend=pretend)
 
     # TODO: should also remove photos that don't belong to album anymore relying on photo timestamp
+    def remove_photos_from_albums(self, pretend=False):
+        if not self.google_photos_albums:
+            self.__list_google_albums()
+
+        for album_name in self.photos_to_upload_per_albums.keys():
+            album_id = self.__get_album_id(album_name, pretend)
+
+            local_photos_in_album = self.photos_to_upload_per_albums[album_name]
+            if not local_photos_in_album:
+                logger.info(f"There are no local photos that should be in {album_name}, skipping ...")
+                continue
+
+            oldest_photo_dt, newest_photo_dt = min(local_photos_in_album).creationTime, max(local_photos_in_album).creationTime
+            oldest_photo_dt = oldest_photo_dt - timedelta(days=1)  # HACK: some pics taken abroad have wrong timezone in exifdata but google photos override with correct timezone.
+            logger.debug(f"Oldest local photo in matching album config was taken at {oldest_photo_dt} and newest at {newest_photo_dt}.")
+
+            photos_in_album = set()
+            for i in self.google_photos_client.search_items_by_album(album_id):
+                try:
+                    photo_dt = datetime.strptime(re.sub(r'\.0*([0-9]{0,6})[0-9]*Z$','.\\1Z',i['mediaMetadata']['creationTime']), "%Y-%m-%dT%H:%M:%S.%fZ")
+                except ValueError:
+                    try:
+                        photo_dt = datetime.strptime(i['mediaMetadata']['creationTime'], "%Y-%m-%dT%H:%M:%SZ")
+                    except ValueError:
+                        logger.error(f"Unknown time format '{i['mediaMetadata']['creationTime']}' of {i}, skipping ...")
+                        continue
+
+                # logger.debug(f"Looking at remote photo {i['filename']} taken at '{photo_dt}'")
+                if oldest_photo_dt <= photo_dt <= newest_photo_dt:
+                    photos_in_album.add(Photo(
+                        googleId=i['id'],
+                        filename=i['filename'],
+                        googleDescription=i.get('description', None),
+                        googleMetadata=i['mediaMetadata']))
+
+            photos_to_remove_from_album = photos_in_album - local_photos_in_album
+            logger.info(f'Photos to remove from {album_name}: {photos_to_remove_from_album}')
+            self.google_photos_client.remove_items_from_album(photos_to_remove_from_album, album_id, pretend=pretend)
+
     def sync(self, photos, pretend=False):
         # Only upload photos that are not already on GooglePhotos (using filename as comparator)
-        photosToUpload = photos - self.photosAlreadyUploaded
-        photosToUpdateMetadata = self.photosAlreadyUploaded & photos
+        #photosToUpload = photos - self.photosAlreadyUploaded
+        #photosToUpdateMetadata = self.photosAlreadyUploaded & photos
 
         # ...
+        pass
 
 
 class Config:
@@ -251,7 +334,7 @@ class GooglePhotosClient:
         self.service = build('photoslibrary', 'v1', http=self.appCreds.authorize(Http()))
 
     # This will only upload photos that aren't already uploaded.
-    def upload(self, photos, batchSize=25, pretend=False):
+    def upload(self, photos, batch_size=25, pretend=False):
         UPLOAD_URL = 'https://photoslibrary.googleapis.com/v1/uploads'
         all_results = []
 
@@ -286,7 +369,7 @@ class GooglePhotosClient:
                     "simpleMediaItem": {
                         "uploadToken": p.uploadToken
                     }})
-            if len(payload["newMediaItems"]) >= batchSize or i == (len(photos) - 1):
+            if len(payload["newMediaItems"]) >= batch_size or i == (len(photos) - 1):
                 logger.debug('Creating %s items ...' % len(payload["newMediaItems"]))
                 if pretend:
                     logger.info("{0} items creation simulated".format(len(payload["newMediaItems"])))
@@ -309,12 +392,12 @@ class GooglePhotosClient:
             self.service.albums().create(body=payload).execute()
         return
 
-    def add_items_to_album(self, photos, album_id, batchSize=40, pretend=False):
+    def add_items_to_album(self, photos, album_id, batch_size=40, pretend=False):
         payload = {"mediaItemIds": []}
         for (i, photo) in enumerate(photos):
             payload["mediaItemIds"].append(photo.googleId)
 
-            if len(payload["mediaItemIds"]) >= batchSize or i == (len(photos) - 1):
+            if len(payload["mediaItemIds"]) >= batch_size or i == (len(photos) - 1):
                 if not pretend:
                     if payload["mediaItemIds"].count(None) > 0:
                         logger.warning('%s items to add to %s have no google_id !' % (payload["mediaItemIds"].count(None), album_id))
@@ -332,6 +415,32 @@ class GooglePhotosClient:
                 self.service.albums().batchAddMediaItems(albumId=album_id, body=payload).execute()
                 td = (time.time() - t0)
                 logger.info('Added {0} items to album in {1:.2f}s ({2}/{3})'.format(len(payload["mediaItemIds"]), td, i+1, len(photos)))
+                payload = {"mediaItemIds": []}
+        return
+
+    def remove_items_from_album(self, photos, album_id, batch_size=40, pretend=False):
+        payload = {"mediaItemIds": []}
+        for (i, photo) in enumerate(photos):
+            payload["mediaItemIds"].append(photo.googleId)
+
+            if len(payload["mediaItemIds"]) >= batch_size or i == (len(photos) - 1):
+                if not pretend:
+                    if payload["mediaItemIds"].count(None) > 0:
+                        logger.warning('%s items to remove from %s have no google_id !' % (payload["mediaItemIds"].count(None), album_id))
+                    else:
+                        logger.info('All items to remove from album have a google_id :-)')
+
+                logger.debug('Removing %s items from album %s ...' % (len(payload["mediaItemIds"]), album_id))
+
+                if pretend:
+                    logger.info("Simulating removing %s items from album %s ..." % (len(payload["mediaItemIds"]), album_id))
+                    payload["mediaItemIds"] = []
+                    continue
+
+                t0 = time.time()
+                self.service.albums().batchRemoveMediaItems(albumId=album_id, body=payload).execute()
+                td = (time.time() - t0)
+                logger.info('Removed {0} items from album in {1:.2f}s ({2}/{3})'.format(len(payload["mediaItemIds"]), td, i+1, len(photos)))
                 payload = {"mediaItemIds": []}
         return
 
@@ -358,6 +467,7 @@ class GooglePhotosClient:
         logger.info('Found %i items while searching google photos' % len(medias))
         return medias
 
+    # Google Photos API doesn't support conjunction of album and time range filters
     def search_items_by_album(self, album_id):
         return self.__search_items(field={'albumId': album_id})
 
@@ -406,8 +516,8 @@ class GooglePhotosClient:
 
 class Photo:
     def __init__(self, filename, **kwargs):
-        self.filepath = filename  # Used only for uploading
-        self.filename = re.sub(FILENAME_STANDARIZE_REGEX, '', filename)  # Standardize filename, it's used as identifier / comparator
+        self.file_path = filename  # Used only for uploading
+        self.short_file_path = re.sub(FILE_PATH_SHORTENING_REGEX, '', filename)  # Standardize filename, it's used as identifier / comparator
         self.googleId = kwargs.pop('googleId', None)
         self.googleDescription = kwargs.pop('googleDescription', None)
         self.googleMetadata = kwargs.pop('googleMetadata', None)
@@ -417,11 +527,11 @@ class Photo:
 
     # Not defining __str__ so __repr__ is used
     def __repr__(self):
-        return "Photo(filename='{0}', keywords='{1}', creationTime='{2}', gid='{3}')".format(self.filename, self.keywords, self.creationTime, self.googleId)
+        return "Photo(filename='{0}', keywords='{1}', creationTime='{2}', gid='{3}')".format(self.short_file_path, self.keywords, self.creationTime, self.googleId)
 
     # Used for set subtraction
     def __eq__(self, obj):
-        return isinstance(obj, Photo) and obj.filename == self.filename
+        return isinstance(obj, Photo) and obj.short_file_path == self.short_file_path
 
     def __lt__(self, obj):
         return isinstance(obj, Photo) and self.creationTime < obj.creationTime
@@ -430,18 +540,54 @@ class Photo:
         return isinstance(obj, Photo) and self.creationTime > obj.creationTime
 
     def __hash__(self):
-        return hash(self.filename)
+        return hash(self.short_file_path)
+
+
+config = Config()
 
 
 def main():
     # Parse command-line options
-    parser = argparse.ArgumentParser()
+    description = f"""
+    This tool upload your photos (local files) to Google Photos if they match album mapping defined in '{ALBUM_CONFIG_FILE}'. 
+    
+    For a photo to match an album mapping, it must satisfy all following conditions:
+    - Its short file path (full path trimmed by '{FILE_PATH_SHORTENING_REGEX}') must match 'FilePath' defined in '{ALBUM_CONFIG_FILE}'. 
+    - At least one 'Keywords' from Exif data must match 'KeywordsIncl' if defined in '{ALBUM_CONFIG_FILE}'.
+    - None of the 'Keywords' from Exif data must match 'KeywordsExcl' if defined in '{ALBUM_CONFIG_FILE}'.
+
+    This tool does not store state between execution so in order to be able to remove photos from albums without scanning all photos, 
+    it assumes you pass all photos for the range between the older and newest photos via the --path argument, 
+    if the album on Google Photos contains extra photos for that time range, it will remove them, 
+    this tool does not delete photos from Google Photos, only upload and add/remove from albums.
+    """
+    parser = argparse.ArgumentParser(description=textwrap.dedent(description), formatter_class=argparse.RawDescriptionHelpFormatter)
     log_levels = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
     log_scope = ('root', 'all')
+    albums = config.albums_mapping.keys()
+
     parser.add_argument('--log-level', default='INFO', choices=log_levels)
-    parser.add_argument('--log-scope', default='root', choices=log_scope)
-    parser.add_argument("--path", help="path of photos to sync", required=True)
-    parser.add_argument("--pretend", help="dry-run mode", action="store_true")
+    parser.add_argument('--log-scope', help="'root' only shows this script's log, 'all' shows logs from libraries, useful for debugging", default='root', choices=log_scope)
+    parser.add_argument("--pretend", help="Dry-run mode, do not do anything, just simulate.", action="store_true")
+
+    subparsers = parser.add_subparsers(title="actions available", dest="action", required=True)
+
+    parser_add_to_albums = subparsers.add_parser('add-to-albums', help='Upload new photos that match any albums mapping and add them to Google Photos albums that they match.')
+    parser_add_to_albums.add_argument("--path", help="path of photos to add", required=True)
+    parser_add_to_albums.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
+
+    parser_remove_from_albums = subparsers.add_parser('remove-from-albums', help="Remove photos from Google Photos albums that do not match album mapping anymore. Only photos that are in time range of oldest/newest photos specified by --path will be remove from albums. This does not delete photos from Google Photos")
+    parser_remove_from_albums.add_argument("--path", help="path of photos to scan", required=True)
+    parser_remove_from_albums.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
+
+    parser_sync_to_albums = subparsers.add_parser('sync-to-albums', help='Upload new photos, add/remove them from Google Photos albums for photos that do not match rule for the time range of the oldest/newest')
+    parser_sync_to_albums.add_argument("--path", help="path of photos to scan", required=True)
+    parser_sync_to_albums.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
+
+    subparsers.add_parser('create-missing-albums', help='Create albums defined in Config that are missing on Google Photos, do not add any photos to it.')
+    subparsers.add_parser('validate-albums-mapping', help=f"Validate albums mapping from '{ALBUM_CONFIG_FILE}'.")
+
+
     args = parser.parse_args()
 
     # Setup logging
@@ -455,21 +601,52 @@ def main():
     logger.addHandler(sh)
     logger.setLevel(args.log_level)
 
-    # TODO: only add photos to albums that aren't already part of it and remove ones that aren't part of it anymore, for this we need to search items for that album.
+    def __filter_albums():
+        if args.album:
+            ignored_albums = set(config.albums_mapping.keys()) - set(args.album)
+            for ignored_album in ignored_albums:
+                del config.albums_mapping[ignored_album]
+        logger.info(config.albums_mapping)
 
-    ps = PhotosSync()
-
-    ps.list_local_photos(args.path)
-
-    ps.load_local_photos_exif_data()
-
-    ps.map_local_photos_to_albums()
-
-    ps.upload_photos(pretend=args.pretend)
-
-    ps.create_missing_albums(pretend=args.pretend)
-
-    ps.add_photos_to_albums(pretend=args.pretend)
+    if args.action == 'add-to-albums':
+        __filter_albums()
+        ps = PhotosSync()
+        ps.list_local_photos(args.path)
+        ps.load_local_photos_exif_data()
+        ps.match_local_photos_to_albums()
+        ps.upload_photos(pretend=args.pretend)
+        ps.create_missing_albums(pretend=args.pretend)
+        ps.add_photos_to_albums(pretend=args.pretend)
+    elif args.action == 'remove-from-albums':
+        __filter_albums()
+        ps = PhotosSync()
+        ps.list_local_photos(args.path)
+        ps.load_local_photos_exif_data()
+        ps.match_local_photos_to_albums()
+        ps.remove_photos_from_albums(pretend=args.pretend)
+    elif args.action == 'sync-to-albums':
+        print('Not implemented yet')
+    elif args.action == 'create-missing-albums':
+        __filter_albums()
+        ps = PhotosSync()
+        ps.create_missing_albums(pretend=args.pretend)
+    elif args.action == 'validate-albums-mapping':
+        is_config_okay = True
+        supported_fields = {'FilePath', 'KeywordsIncl', 'KeywordsExcl'}
+        for album_name in config.albums_mapping:
+            if 'FilePath' not in config.albums_mapping[album_name].keys():
+                logger.critical(f"'{album_name}' is missing required field 'FilePath'.")
+                is_config_okay = False
+            unsupported_fields = set(config.albums_mapping[album_name].keys()) - supported_fields
+            if unsupported_fields:
+                logger.critical(f"'{album_name}' has unsupported fields: {', '.join(unsupported_fields)}. Only {', '.join(supported_fields)} are allowed.")
+                is_config_okay = False
+        if is_config_okay:
+            logger.info('Album mapping is valid :-)')
+        else:
+            logger.critical(f"Edit '{ALBUM_CONFIG_FILE}' and try again.")
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
