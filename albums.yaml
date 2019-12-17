@@ -1,0 +1,9 @@
+# This file defines album matching rules
+#
+#AlbumNameA:
+#  KeywordsIncl: 'Rating[45]'
+#  FilePath: '.*'
+#AlbumNameB:
+#  KeywordsIncl: 'Rating[34]'
+#  KeywordsExcl: 'Friends'
+#  FilePath: '.*'

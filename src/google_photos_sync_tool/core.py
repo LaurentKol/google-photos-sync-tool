@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 
 This tool is meant to sync your local photos to Google Photos, based on ALBUM_CONFIG_FILE and keywords in exifdata.
@@ -17,7 +16,7 @@ pip install -r requirements.txt to use version of modules I tested with OR take 
 pip install --upgrade google-api-python-client oauth2client PyExifTool requests pyyaml
 
 TODO: Write tests
-TODO: Make this a package
+TODO: Break this file in smaller ones
 TODO: Finish sync feature, now only upload photos and add-to/create albums but doesn't remove from album
 TODO: Some hard-coded values to clean-up
 TODO: Fix hack about wrong timezone, -1d or at make it an option
@@ -45,7 +44,7 @@ from oauth2client import client
 from oauth2client import file
 from oauth2client import tools
 
-ALBUM_CONFIG_FILE = 'album-rules.yaml'
+ALBUM_CONFIG_FILE = 'albums.yaml'
 
 # This is used to shorten file path which is used as photos identifier (it's human readable and does not change when exifdata gets modified).
 # Not using full path allows changing photos' basedir and hides full path from Google Photos ("filename" field).
@@ -317,6 +316,9 @@ class Config:
         except yaml.YAMLError as exc:
             logger.critical("Error in Album mapping config file:", exc)
             sys.exit(1)
+        except FileNotFoundError as exc:
+            logger.warning("'{}' file not found, assuming empty Error in Album mapping config file:", ALBUM_CONFIG_FILE)
+            self.albums_mapping = {}
 
 
 class GooglePhotosClient:
