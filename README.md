@@ -3,11 +3,11 @@ Python tool to sync your photos matching EXIF keywords to Google Photos albums
 
 Setup:
 ```
-git clone git@github.com:LaurentKol/google-photos-sync-tool.git
-cd google-photos-sync-tool
+# optionally use virtual environement
 virtualenv --python=python3.7 venv
 source venv/bin/activate
-pip install -r requirements.txt
+
+pip install git+https://github.com/LaurentKol/google-photos-sync-tool.git
 ```
 1. Go to https://console.cloud.google.com/apis/credentials and click "create credentials" and select "OAuth Client Id", once done click 'Download JSON'
 2. Put that JSON file in script's directory and rename it.
