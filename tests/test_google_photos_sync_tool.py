@@ -4,7 +4,7 @@ from mock import patch
 import pytest
 
 from google_photos_sync_tool.config import Config
-from google_photos_sync_tool.core import PhotosSync
+from google_photos_sync_tool.photossync import PhotosSync
 from google_photos_sync_tool.photo import Photo
 
 
@@ -49,7 +49,8 @@ class TestPhotosSync(object):
         'GreenButNotFriends': {
             Photo(file_path='tests/data/kw-green.jpg', keywords='green', creationTime='2019-04-09 11:12:51', gid=None),
             Photo(file_path='tests/data/kw-green-family.jpg', keywords=['family', 'green'], creationTime='2019-04-09 11:12:51', gid=None)},
-        'GreenOrYellowButFilePathFilter': set()
+        'GreenOrYellowButFilePathFilter': {
+            Photo(short_file_path='tests/data/kw-yellow.jpg', keywords='yellow', creationTime='2019-04-09 11:12:51', gid=None)}
     }]
 
     # Also compare keywords and creationTime for Photo object equality

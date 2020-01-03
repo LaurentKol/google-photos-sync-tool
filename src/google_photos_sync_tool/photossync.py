@@ -6,7 +6,7 @@ use --noauth_local_webserver to generate credentials.json if running on a box wi
 
 Tested with Python 3.7.4
 
-TODO: Write tests
+TODO: Write more tests
 TODO: Add option to force listing all photos instead of relying on time range (to workaround possible timezone issue)
 TODO: Fix hack about wrong timezone, -1d or at make it an option
 TODO: Finish sync feature, now only upload photos and add-to/create albums but doesn't remove from album
@@ -15,20 +15,17 @@ TODO: Rewrite upload, add_items_to_album, remove_items_from_album from GooglePho
 TODO: Implement retries on API call failure
 """
 
-import argparse
 import glob
 import logging
 import re
 import sys
-import textwrap
 import time
 from datetime import datetime
-from datetime import timedelta
 from pprint import pformat
 
 import exiftool
 
-from google_photos_sync_tool.config import Config, ALBUM_CONFIG_FILE, FILE_PATH_SHORTENING_REGEX
+from google_photos_sync_tool.config import FILE_PATH_SHORTENING_REGEX
 from google_photos_sync_tool.photo import Photo
 from google_photos_sync_tool.googlephotosclient import GooglePhotosClient
 
@@ -108,7 +105,7 @@ class PhotosSync:
             for exif_data in self.local_photos_exif_data:
                 # Go to next photo if its file path doesn't match albums_mapping defined in ALBUM_CONFIG_FILE.
                 photo_file_path = re.sub(FILE_PATH_SHORTENING_REGEX, '', exif_data["SourceFile"])
-                if not self.__match_all(photo_file_path, regexps['FilePath']):
+                if not self.__match_all([photo_file_path], regexps['FilePath']):
                     continue
 
                 # Allow photo to have no Exifdata, in case only want to match against FilePath
@@ -156,7 +153,7 @@ class PhotosSync:
         if not self.photos_to_upload:
             return  # In case no photos are to upload, don't query Google Photo API
         oldest_photo_dt, newest_photo_dt = min(self.photos_to_upload).creationTime, max(self.photos_to_upload).creationTime
-        oldest_photo_dt = oldest_photo_dt - timedelta(days=1)  # HACK: some pics taken abroad have wrong timezone in exifdata but google photos override with correct timezone.
+        #oldest_photo_dt = oldest_photo_dt - timedelta(days=1)  # HACK: some pics taken abroad have wrong timezone in exifdata but google photos override with correct timezone.
         logger.info('Listing google photos from %s to %s' % (oldest_photo_dt, newest_photo_dt))
         for i in self.google_photos_client.search_items_by_date_range(oldest_photo_dt, newest_photo_dt):
             self.photos_already_uploaded.add(Photo(
@@ -254,7 +251,7 @@ class PhotosSync:
                 continue
 
             oldest_photo_dt, newest_photo_dt = min(local_photos_in_album).creationTime, max(local_photos_in_album).creationTime
-            oldest_photo_dt = oldest_photo_dt - timedelta(days=1)  # HACK: some pics taken abroad have wrong timezone in exifdata but google photos override with correct timezone.
+            # oldest_photo_dt = oldest_photo_dt - timedelta(days=1)  # HACK: some pics taken abroad have wrong timezone in exifdata but google photos override with correct timezone.
             logger.debug(f"Oldest local photo in matching album config was taken at {oldest_photo_dt} and newest at {newest_photo_dt}.")
 
             photos_in_album = set()
@@ -290,110 +287,3 @@ class PhotosSync:
 
 
 
-
-def main():
-    # Parse command-line options
-    description = f"""
-    This tool upload your photos (local files) to Google Photos if they match album mapping defined in '{ALBUM_CONFIG_FILE}'. 
-    
-    For a photo to match an album mapping, it must satisfy all following conditions:
-    - Its short file path (full path trimmed by '{FILE_PATH_SHORTENING_REGEX}') must match 'FilePath' defined in '{ALBUM_CONFIG_FILE}'. 
-    - At least one 'Keywords' from Exif data must match 'KeywordsIncl' if defined in '{ALBUM_CONFIG_FILE}'.
-    - None of the 'Keywords' from Exif data must match 'KeywordsExcl' if defined in '{ALBUM_CONFIG_FILE}'.
-
-    This tool does not store state between execution so in order to be able to remove photos from albums without scanning all photos, 
-    it assumes you pass all photos for the range between the older and newest photos via the --path argument, 
-    if the album on Google Photos contains extra photos for that time range, it will remove them, 
-    this tool does not delete photos from Google Photos, only upload and add/remove from albums.
-    """
-    parser = argparse.ArgumentParser(description=textwrap.dedent(description), formatter_class=argparse.RawDescriptionHelpFormatter)
-    log_levels = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
-    log_scope = ('root', 'all')
-    config = Config()
-    albums = config.albums_mapping.keys()
-
-    parser.add_argument('--log-level', default='INFO', choices=log_levels)
-    parser.add_argument('--log-scope', help="'root' only shows this script's log, 'all' shows logs from libraries, useful for debugging", default='root', choices=log_scope)
-    parser.add_argument("--pretend", help="Dry-run mode, do not do anything, just simulate.", action="store_true")
-
-    subparsers = parser.add_subparsers(title="actions available", dest="action")  # would add 'required=True' but breaks for python 3.6
-
-    parser_add_to_albums = subparsers.add_parser('add-to-albums', help='Upload new photos that match any albums mapping and add them to Google Photos albums that they match.')
-    parser_add_to_albums.add_argument("--path", help="path of photos to add", required=True)
-    parser_add_to_albums.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
-
-    parser_remove_from_albums = subparsers.add_parser('remove-from-albums', help="Remove photos from Google Photos albums that do not match album mapping anymore. Only photos that are in time range of oldest/newest photos specified by --path will be remove from albums. This does not delete photos from Google Photos")
-    parser_remove_from_albums.add_argument("--path", help="path of photos to scan", required=True)
-    parser_remove_from_albums.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
-
-    parser_sync_to_albums = subparsers.add_parser('sync-to-albums', help='Upload new photos, add/remove them from Google Photos albums for photos that do not match rule for the time range of the oldest/newest')
-    parser_sync_to_albums.add_argument("--path", help="path of photos to scan", required=True)
-    parser_sync_to_albums.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
-
-    subparsers.add_parser('create-missing-albums', help='Create albums defined in Config that are missing on Google Photos, do not add any photos to it.')
-    subparsers.add_parser('validate-albums-mapping', help=f"Validate albums mapping from '{ALBUM_CONFIG_FILE}'.")
-
-
-    args = parser.parse_args()
-
-    # Setup logging
-    sh = logging.StreamHandler(sys.stdout)
-    #  Filter must be on handler to filter other module logging: http://docs.python.org/library/logging.html#filter-objects
-    if args.log_scope == 'root':
-        sh.addFilter(logging.Filter(name=args.log_scope))
-    formatter = logging.Formatter('[%(levelname)s] [%(name)s] %(message)s')
-    sh.setFormatter(formatter)
-    sh.setLevel(args.log_level)
-    logger.addHandler(sh)
-    logger.setLevel(args.log_level)
-
-    def __filter_albums():
-        if 'album' in args and args.album:
-            ignored_albums = set(config.albums_mapping.keys()) - set(args.album)
-            for ignored_album in ignored_albums:
-                del config.albums_mapping[ignored_album]
-        logger.info(config.albums_mapping)
-
-    if args.action == 'add-to-albums':
-        __filter_albums()
-        ps = PhotosSync()
-        ps.list_local_photos(args.path)
-        ps.load_local_photos_exif_data()
-        ps.match_local_photos_to_albums(config)
-        ps.upload_photos(pretend=args.pretend)
-        ps.create_missing_albums(config, pretend=args.pretend)
-        ps.add_photos_to_albums(pretend=args.pretend)
-    elif args.action == 'remove-from-albums':
-        __filter_albums()
-        ps = PhotosSync()
-        ps.list_local_photos(args.path)
-        ps.load_local_photos_exif_data()
-        ps.match_local_photos_to_albums(config)
-        ps.remove_photos_from_albums(pretend=args.pretend)
-    elif args.action == 'sync-to-albums':
-        print('Not implemented yet')
-    elif args.action == 'create-missing-albums':
-        __filter_albums()
-        ps = PhotosSync()
-        ps.create_missing_albums(config, pretend=args.pretend)
-    elif args.action == 'validate-albums-mapping':
-        is_config_okay = True
-        supported_fields = {'FilePath', 'KeywordsIncl', 'KeywordsExcl'}
-        for album_name in config.albums_mapping:
-            if 'FilePath' not in config.albums_mapping[album_name].keys():
-                logger.critical(f"'{album_name}' is missing required field 'FilePath'.")
-                is_config_okay = False
-            unsupported_fields = set(config.albums_mapping[album_name].keys()) - supported_fields
-            if unsupported_fields:
-                logger.critical(f"'{album_name}' has unsupported fields: {', '.join(unsupported_fields)}. Only {', '.join(supported_fields)} are allowed.")
-                is_config_okay = False
-        if is_config_okay:
-            logger.info('Album mapping is valid :-)')
-        else:
-            logger.critical(f"Edit '{ALBUM_CONFIG_FILE}' and try again.")
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()

@@ -27,7 +27,7 @@ setup(
     packages=find_packages(where="src", exclude=('tests', 'docs')),
     entry_points={
         "console_scripts": [
-            "google_photos_sync_tool=google_photos_sync_tool.core:main",
+            "google_photos_sync_tool=google_photos_sync_tool.__main__:main",
         ],
     }
 )
