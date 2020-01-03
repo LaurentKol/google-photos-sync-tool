@@ -13,6 +13,7 @@ TODO: Finish sync feature, now only upload photos and add-to/create albums but d
 TODO: Some hard-coded values to clean-up
 TODO: Rewrite upload, add_items_to_album, remove_items_from_album from GooglePhotosClient to share batching logic
 TODO: Implement retries on API call failure
+TODO: Improve timezone detection, e.g: DJI store GPS location but not GPS time, to convert into UTC need to resolve TZ from location, maybe with https://pypi.org/project/timezonefinder/
 """
 
 import glob
@@ -20,7 +21,7 @@ import logging
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pprint import pformat
 
 import exiftool
@@ -65,8 +66,13 @@ class PhotosSync:
         t0 = time.time()
         with exiftool.ExifTool() as et:
             # metadata = et.get_metadata_batch(self.local_photos)
-            self.local_photos_exif_data = et.get_tags_batch(["SourceFile", "IPTC:Keywords", "EXIF:DateTimeOriginal", "EXIF:OffsetTimeOriginal"],
-                                          self.local_photos)
+            self.local_photos_exif_data = et.get_tags_batch(
+                ["SourceFile",
+                "IPTC:Keywords",
+                "EXIF:DateTimeOriginal",
+                "EXIF:SubSecDateTimeOriginal",
+                "EXIF:OffsetTimeOriginal"],
+                self.local_photos)
             logger.debug('%i of %i retrieved successfully' % (len(self.local_photos_exif_data), len(self.local_photos)))
         td = (time.time() - t0)
         logger.info('Done retrieving exif data of {2} photos in {0:.2f}s ({1:.3f}s per photo)'.format(td, (td / len(self.local_photos)), len(self.local_photos_exif_data)))
@@ -121,9 +127,32 @@ class PhotosSync:
                     continue
 
                 # If we reached here, this photo belongs to album_name.
+                # First try to determine UTC time.
+
+                # I think this is fixed in 3.7, to check
+                def __tz_normalizer(dt_with_tz):
+                    if ":" == dt_with_tz[-3:-2]:
+                        return dt_with_tz[:-3]+dt_with_tz[-2:]
+                    else:
+                        return dt_with_tz
+
+                if 'SubSecDateTimeOriginal' in exif_data:
+                    creation_time = datetime.strptime(__tz_normalizer(exif_data["EXIF:SubSecDateTimeOriginal"]), '%Y:%m:%d %H:%M:%S%z')
+                    # In case next photo has no TZ info, fallback to previous photo's TZ (not great but better than assuming UTC)
+                    previous_photo_tz = creation_time.tzinfo
+                elif 'EXIF:DateTimeOriginal' and 'EXIF:OffsetTimeOriginal' in exif_data:
+                    creation_time = datetime.strptime(exif_data["EXIF:DateTimeOriginal"] + __tz_normalizer(exif_data["EXIF:OffsetTimeOriginal"]), '%Y:%m:%d %H:%M:%S%z')
+                    previous_photo_tz = creation_time.tzinfo
+                elif 'EXIF:DateTimeOriginal' in exif_data and previous_photo_tz:
+                    logger.warn(f"Could not find timezone information for {exif_data['SourceFile']}, defaulting to previous photos ({str(previous_photo_tz)})")
+                    creation_time = datetime.strptime(exif_data["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S').replace(tzinfo=previous_photo_tz)
+                else:
+                    logger.warn(f"Could not find timezone information for {exif_data['SourceFile']} assuming +9 JST (most likely incorrect)")
+                    creation_time = datetime.strptime(exif_data["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S').replace(tzinfo=timezone(datetime.timedelta(hours=+9)))
+
                 photos_to_upload_per_albums[album_name].add(
                     Photo(file_path=exif_data["SourceFile"],
-                          creationTime=datetime.strptime(exif_data["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S'),
+                          creationTime=creation_time,
                           keywords=exif_data["IPTC:Keywords"]))
 
         logger.debug("photosToUploadPerAlbums: %s" % pformat(photos_to_upload_per_albums))
@@ -257,10 +286,10 @@ class PhotosSync:
             photos_in_album = set()
             for i in self.google_photos_client.search_items_by_album(album_id):
                 try:
-                    photo_dt = datetime.strptime(re.sub(r'\.0*([0-9]{0,6})[0-9]*Z$','.\\1Z',i['mediaMetadata']['creationTime']), "%Y-%m-%dT%H:%M:%S.%fZ")
+                    photo_dt = datetime.strptime(re.sub(r'\.0*([0-9]{0,6})[0-9]*Z$', '.\\1Z', i['mediaMetadata']['creationTime']), "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
                 except ValueError:
                     try:
-                        photo_dt = datetime.strptime(i['mediaMetadata']['creationTime'], "%Y-%m-%dT%H:%M:%SZ")
+                        photo_dt = datetime.strptime(i['mediaMetadata']['creationTime'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
                     except ValueError:
                         logger.error(f"Unknown time format '{i['mediaMetadata']['creationTime']}' of {i}, skipping ...")
                         continue
