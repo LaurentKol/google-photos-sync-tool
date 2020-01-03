@@ -1,0 +1,18 @@
+# Test config used when running pytest
+Green:
+  KeywordsIncl: 'green'
+  FilePath: '.*'
+GreenAndFriends:
+  KeywordsIncl: ['green','friends']
+  FilePath: '.*'
+GreenButNotFriends:
+  KeywordsIncl: 'green'
+  KeywordsExcl: 'friends'
+  FilePath: '.*'
+BlueOrGreenOrRedOrYellowButNotFriendsNorFamily:
+  KeywordsIncl: '(blue|green|red|yellow)'
+  KeywordsExcl: '^(family|friends)$'
+  FilePath: '.*'
+GreenOrYellowButFilePathFilter:
+  KeywordsIncl: '(green|yellow)'
+  FilePath: 'tests/data/kw-yellow.*'

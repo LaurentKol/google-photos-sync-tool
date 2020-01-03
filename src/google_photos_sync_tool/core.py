@@ -87,7 +87,7 @@ class PhotosSync:
                 return False
         return True
 
-    def match_local_photos_to_albums(self):
+    def match_local_photos_to_albums(self, config):
         logger.debug("albumsMapping: %s" % pformat(config.albums_mapping))
         photos_to_upload_per_albums = {}
         for album_name in config.albums_mapping.keys():
@@ -179,8 +179,8 @@ class PhotosSync:
                     logger.debug('Cannot find google_id for %s it is either not uploaded yet or we are running with --pretend' % photo)
 
     def upload_photos(self, pretend=False):
-        self.__list_google_photos()  # This list all google photos  # Used this before, but it's too long to list all google photos
-        #self.__search_google_photos_for_photos_to_upload_time_range()  # This list all google photos for time range
+        #self.__list_google_photos()  # This list all google photos  # Used this before, but it's too long to list all google photos
+        self.__search_google_photos_for_photos_to_upload_time_range()  # This list all google photos for time range
         self.__copy_google_id_to_photos_to_upload_per_albums(self.photos_already_uploaded)
 
         # Only upload photos that are not already on GooglePhotos (using short_file_path as comparator)
@@ -209,7 +209,7 @@ class PhotosSync:
                         if not pretend:
                             logger.warning('Cannot find google_id for %s, looks like we failed to upload it.' % photo)
 
-    def create_missing_albums(self, pretend=False):
+    def create_missing_albums(self, config, pretend=False):
         self.__list_google_albums()
         # Create albums if don't already exist.
         albums_to_create = [a for a in config.albums_mapping.keys() if a not in [d['title'] for d in self.google_photos_albums]]
@@ -289,7 +289,6 @@ class PhotosSync:
         pass
 
 
-config = Config()
 
 
 def main():
@@ -310,13 +309,14 @@ def main():
     parser = argparse.ArgumentParser(description=textwrap.dedent(description), formatter_class=argparse.RawDescriptionHelpFormatter)
     log_levels = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
     log_scope = ('root', 'all')
+    config = Config()
     albums = config.albums_mapping.keys()
 
     parser.add_argument('--log-level', default='INFO', choices=log_levels)
     parser.add_argument('--log-scope', help="'root' only shows this script's log, 'all' shows logs from libraries, useful for debugging", default='root', choices=log_scope)
     parser.add_argument("--pretend", help="Dry-run mode, do not do anything, just simulate.", action="store_true")
 
-    subparsers = parser.add_subparsers(title="actions available", dest="action", required=True)
+    subparsers = parser.add_subparsers(title="actions available", dest="action")  # would add 'required=True' but breaks for python 3.6
 
     parser_add_to_albums = subparsers.add_parser('add-to-albums', help='Upload new photos that match any albums mapping and add them to Google Photos albums that they match.')
     parser_add_to_albums.add_argument("--path", help="path of photos to add", required=True)
@@ -348,7 +348,7 @@ def main():
     logger.setLevel(args.log_level)
 
     def __filter_albums():
-        if args.album:
+        if 'album' in args and args.album:
             ignored_albums = set(config.albums_mapping.keys()) - set(args.album)
             for ignored_album in ignored_albums:
                 del config.albums_mapping[ignored_album]
@@ -359,23 +359,23 @@ def main():
         ps = PhotosSync()
         ps.list_local_photos(args.path)
         ps.load_local_photos_exif_data()
-        ps.match_local_photos_to_albums()
+        ps.match_local_photos_to_albums(config)
         ps.upload_photos(pretend=args.pretend)
-        ps.create_missing_albums(pretend=args.pretend)
+        ps.create_missing_albums(config, pretend=args.pretend)
         ps.add_photos_to_albums(pretend=args.pretend)
     elif args.action == 'remove-from-albums':
         __filter_albums()
         ps = PhotosSync()
         ps.list_local_photos(args.path)
         ps.load_local_photos_exif_data()
-        ps.match_local_photos_to_albums()
+        ps.match_local_photos_to_albums(config)
         ps.remove_photos_from_albums(pretend=args.pretend)
     elif args.action == 'sync-to-albums':
         print('Not implemented yet')
     elif args.action == 'create-missing-albums':
         __filter_albums()
         ps = PhotosSync()
-        ps.create_missing_albums(pretend=args.pretend)
+        ps.create_missing_albums(config, pretend=args.pretend)
     elif args.action == 'validate-albums-mapping':
         is_config_okay = True
         supported_fields = {'FilePath', 'KeywordsIncl', 'KeywordsExcl'}

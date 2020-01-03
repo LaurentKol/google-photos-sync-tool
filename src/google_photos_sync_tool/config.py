@@ -20,16 +20,16 @@ logger = logging.getLogger()
 
 
 class Config:
-    def __init__(self):
-        logger.debug('Loading Album matching rules from %s' % ALBUM_CONFIG_FILE)
+    def __init__(self, album_config_file=ALBUM_CONFIG_FILE):
+        logger.debug('Loading Album matching rules from %s' % album_config_file)
         try:
-            with open(ALBUM_CONFIG_FILE, 'r') as opened_file:
+            with open(album_config_file, 'r') as opened_file:
                 self.albums_mapping = yaml.load(opened_file.read(), Loader=yaml.BaseLoader)
-            logger.info('Loaded Album matching rules from %s, albums defined: %s' % (ALBUM_CONFIG_FILE, ', '.join(self.albums_mapping.keys())))
+            logger.info('Loaded Album matching rules from %s, albums defined: %s' % (album_config_file, ', '.join(self.albums_mapping.keys())))
         except yaml.YAMLError as exc:
             logger.critical("Error in Album mapping config file:", exc)
             sys.exit(1)
         except FileNotFoundError as exc:
-            logger.warning("'{}' file not found, assuming empty Error in Album mapping config file:", ALBUM_CONFIG_FILE)
+            logger.warning("'{}' file not found, assuming empty Error in Album mapping config file:", album_config_file)
             self.albums_mapping = {}
 

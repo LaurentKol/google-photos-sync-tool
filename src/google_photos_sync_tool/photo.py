@@ -1,3 +1,4 @@
+from datetime import datetime
 import re
 
 from google_photos_sync_tool.config import FILE_PATH_SHORTENING_REGEX
@@ -13,13 +14,17 @@ class Photo:
         self.googleId = kwargs.pop('googleId', None)
         self.googleDescription = kwargs.pop('googleDescription', None)
         self.googleMetadata = kwargs.pop('googleMetadata', None)
-        self.creationTime = kwargs.pop('creationTime', None)
+        creation_time = kwargs.pop('creationTime', None)
+        if isinstance(creation_time, str):
+            self.creationTime = datetime.strptime(creation_time, '%Y-%m-%d %H:%M:%S')
+        else:
+            self.creationTime = creation_time
         self.keywords = kwargs.pop('keywords', None)
         self.uploadToken = None
 
     # Not defining __str__ so __repr__ is used
     def __repr__(self):
-        return "Photo(filename='{0}', keywords='{1}', creationTime='{2}', gid='{3}')".format(self.short_file_path, self.keywords, self.creationTime, self.googleId)
+        return "Photo(short_file_path='{0}', keywords='{1}', creationTime='{2}', gid='{3}')".format(self.short_file_path, self.keywords, self.creationTime, self.googleId)
 
     # Used for set subtraction
     def __eq__(self, obj):
