@@ -65,11 +65,12 @@ def main():
     logger.setLevel(args.log_level)
 
     def __filter_albums():
+        logger.debug(f"Before album filtering, albums looks like: {config.albums_mapping}")
         if 'album' in args and args.album:
             ignored_albums = set(config.albums_mapping.keys()) - set(args.album)
             for ignored_album in ignored_albums:
                 del config.albums_mapping[ignored_album]
-        logger.info(config.albums_mapping)
+        logger.debug(f"After album filtering, albums looks like: {config.albums_mapping}")
 
     if args.action == 'add-to-albums':
         __filter_albums()
@@ -88,7 +89,15 @@ def main():
         ps.match_local_photos_to_albums(config)
         ps.remove_photos_from_albums(pretend=args.pretend)
     elif args.action == 'sync-to-albums':
-        print('Not implemented yet')
+        __filter_albums()
+        ps = PhotosSync()
+        ps.list_local_photos(args.path)
+        ps.load_local_photos_exif_data()
+        ps.match_local_photos_to_albums(config)
+        ps.upload_photos(pretend=args.pretend)
+        ps.create_missing_albums(config, pretend=args.pretend)
+        ps.add_photos_to_albums(pretend=args.pretend)
+        ps.remove_photos_from_albums(pretend=args.pretend)
     elif args.action == 'create-missing-albums':
         __filter_albums()
         ps = PhotosSync()
