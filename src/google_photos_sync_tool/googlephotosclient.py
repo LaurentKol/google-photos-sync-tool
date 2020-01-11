@@ -1,4 +1,5 @@
 from apiclient.discovery import build
+from googleapiclient import errors
 from httplib2 import Http
 import logging
 from oauth2client import client
@@ -8,6 +9,7 @@ import requests
 import time
 
 logger = logging.getLogger()
+API_MAX_RETRIES = 3
 
 
 class GooglePhotosClient:
@@ -103,7 +105,16 @@ class GooglePhotosClient:
                     continue
 
                 t0 = time.time()
-                self.service.albums().batchAddMediaItems(albumId=album_id, body=payload).execute()
+
+                retries = 0
+                while retries <= API_MAX_RETRIES:
+                    try:
+                        self.service.albums().batchAddMediaItems(albumId=album_id, body=payload).execute()
+                        break
+                    except errors.HttpError as e:
+                        logger.warn(f'HttpError while querying {e.uri}, err:{e.content}, retries left:{(API_MAX_RETRIES - retries)}')
+                        retries += 1
+
                 td = (time.time() - t0)
                 logger.info('Added {0} items to album in {1:.2f}s ({2}/{3})'.format(len(payload["mediaItemIds"]), td, i+1, len(photos)))
                 payload = {"mediaItemIds": []}
