@@ -38,15 +38,21 @@ def main():
 
     parser_add_to_albums = subparsers.add_parser('add-to-albums', help='Upload new photos that match any albums mapping and add them to Google Photos albums that they match.')
     parser_add_to_albums.add_argument("--path", help="path of photos to add", required=True)
-    parser_add_to_albums.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
+    parser_add_to_albums_album_filter_group = parser_add_to_albums.add_mutually_exclusive_group()
+    parser_add_to_albums_album_filter_group.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
+    parser_add_to_albums_album_filter_group.add_argument("--album-ignore", help="album to ignore, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
 
     parser_remove_from_albums = subparsers.add_parser('remove-from-albums', help="Remove photos from Google Photos albums that do not match album mapping anymore. Only photos that are in time range of oldest/newest photos specified by --path will be remove from albums. This does not delete photos from Google Photos")
     parser_remove_from_albums.add_argument("--path", help="path of photos to scan", required=True)
-    parser_remove_from_albums.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
+    parser_remove_from_albums_album_filter_group = parser_remove_from_albums.add_mutually_exclusive_group()
+    parser_remove_from_albums_album_filter_group.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
+    parser_remove_from_albums_album_filter_group.add_argument("--album-ignore", help="album to ignore, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
 
     parser_sync_to_albums = subparsers.add_parser('sync-to-albums', help='Upload new photos, add/remove them from Google Photos albums for photos that do not match rule for the time range of the oldest/newest')
     parser_sync_to_albums.add_argument("--path", help="path of photos to scan", required=True)
-    parser_sync_to_albums.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
+    parser_sync_to_albums_album_filter_group = parser_sync_to_albums.add_mutually_exclusive_group()
+    parser_sync_to_albums_album_filter_group.add_argument("--album", help="album to proceed, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
+    parser_sync_to_albums_album_filter_group.add_argument("--album-ignore", help="album to ignore, can be specified multiple times, if omitted assume all albums", action='append', choices=albums)
 
     subparsers.add_parser('create-missing-albums', help='Create albums defined in Config that are missing on Google Photos, do not add any photos to it.')
     subparsers.add_parser('validate-albums-mapping', help=f"Validate albums mapping from '{ALBUM_CONFIG_FILE}'.")
@@ -70,6 +76,10 @@ def main():
             ignored_albums = set(config.albums_mapping.keys()) - set(args.album)
             for ignored_album in ignored_albums:
                 del config.albums_mapping[ignored_album]
+        elif 'album_ignore' in args and args.album_ignore:
+            for ignored_album in args.album_ignore:
+                del config.albums_mapping[ignored_album]
+
         logger.debug(f"After album filtering, albums looks like: {config.albums_mapping}")
 
     if args.action == 'add-to-albums':
