@@ -150,7 +150,7 @@ class PhotosSync:
                 elif 'EXIF:DateTimeOriginal' in exif_data:
                     creation_time = datetime.strptime(exif_data["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S').replace(tzinfo=timezone(timedelta(hours=+2)))
                     logger.warn(f"Could not find timezone information for {exif_data['SourceFile']} assuming +2 JST (most likely incorrect), assuming creation_time: {creation_time}")
-                    logger.warn(f"You can manually set timezone with: exiftool -if 'not $offsettimeoriginal' -offsettimeoriginal='+XX:00' {exif_data['SourceFile']}")
+                    logger.warn(f"You can manually set timezone with: exiftool -preserve -overwrite_original -if 'not $offsettimeoriginal' -offsettimeoriginal='+XX:00' {exif_data['SourceFile']}")
                 else:
                     logger.critical(f"{exif_data['SourceFile']} has no EXIF:DateTimeOriginal tag. Rather not continue without reasonably reliable way to determine photo's creation time. Exiting ...")
                     sys.exit(1)
@@ -271,13 +271,13 @@ class PhotosSync:
             album_id = self.__get_album_id(album_name, pretend)
             self.google_photos_client.add_items_to_album(self.photos_to_upload_per_albums[album_name], album_id, pretend=pretend)
 
-    # TODO: should also remove photos that don't belong to album anymore relying on photo timestamp
     def remove_photos_from_albums(self, pretend=False):
         if not self.google_photos_albums:
             self.__list_google_albums()
 
         for album_name in self.photos_to_upload_per_albums.keys():
             album_id = self.__get_album_id(album_name, pretend)
+            logger.debug('Album %s is %s' % (album_name, album_id))
 
             local_photos_in_album = self.photos_to_upload_per_albums[album_name]
             if not local_photos_in_album:
