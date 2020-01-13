@@ -1,4 +1,5 @@
 from apiclient.discovery import build
+from datetime import datetime
 from googleapiclient import errors
 from httplib2 import Http
 import logging
@@ -9,7 +10,8 @@ import requests
 import time
 
 logger = logging.getLogger()
-API_MAX_RETRIES = 3
+MAX_API_RETRIES = 3
+API_CALL_TIMEOUT = 60
 
 
 class GooglePhotosClient:
@@ -24,7 +26,9 @@ class GooglePhotosClient:
             flags = tools.argparser.parse_args(args=[])  # tools.run_flow() will call it's own argparse so make it ignore this script's cmd line args
             flow = client.flow_from_clientsecrets(api_cred_file, scopes)
             self.appCreds = tools.run_flow(flow, self.appCredStore, flags)
-        self.service = build('photoslibrary', 'v1', http=self.appCreds.authorize(Http()))
+        http = self.appCreds.authorize(Http())
+        http.timeout = API_CALL_TIMEOUT
+        self.service = build('photoslibrary', 'v1', http=http)
 
     # This will only upload photos that aren't already uploaded.
     def upload(self, photos, batch_size=25, pretend=False):
@@ -70,7 +74,7 @@ class GooglePhotosClient:
                     continue
                 t0 = time.time()
                 request = self.service.mediaItems().batchCreate(body=payload)
-                results = request.execute()
+                results = request.execute(num_retries=MAX_API_RETRIES)
                 all_results += results['newMediaItemResults']
                 td = (time.time() - t0)
                 logger.info('Created {0} items in {1:.2f}s'.format(len(results['newMediaItemResults']), td))
@@ -82,7 +86,7 @@ class GooglePhotosClient:
         payload = {"album": {"title": albumName}}
         logger.info('Creating album: %s' % albumName)
         if not pretend:
-            self.service.albums().create(body=payload).execute()
+            self.service.albums().create(body=payload).execute(num_retries=MAX_API_RETRIES)
         return
 
     def add_items_to_album(self, photos, album_id, batch_size=40, pretend=False):
@@ -105,14 +109,14 @@ class GooglePhotosClient:
                     continue
 
                 t0 = time.time()
-
+                # Implementing retry because apiclient doesn't retry on HttpError 409 "The operation was aborted." although retry usually succeed.
                 retries = 0
-                while retries <= API_MAX_RETRIES:
+                while retries <= MAX_API_RETRIES:
                     try:
-                        self.service.albums().batchAddMediaItems(albumId=album_id, body=payload).execute()
+                        self.service.albums().batchAddMediaItems(albumId=album_id, body=payload).execute(num_retries=MAX_API_RETRIES)
                         break
                     except errors.HttpError as e:
-                        logger.warn(f'HttpError while querying {e.uri}, err:{e.content}, retries left:{(API_MAX_RETRIES - retries)}')
+                        logger.warn(f'HttpError while querying {e.uri}, err:{e.content}, retries left:{(MAX_API_RETRIES - retries)}')
                         retries += 1
 
                 td = (time.time() - t0)
@@ -140,7 +144,7 @@ class GooglePhotosClient:
                     continue
 
                 t0 = time.time()
-                self.service.albums().batchRemoveMediaItems(albumId=album_id, body=payload).execute()
+                self.service.albums().batchRemoveMediaItems(albumId=album_id, body=payload).execute(num_retries=MAX_API_RETRIES)
                 td = (time.time() - t0)
                 logger.info('Removed {0} items from album in {1:.2f}s ({2}/{3})'.format(len(payload["mediaItemIds"]), td, i+1, len(photos)))
                 payload = {"mediaItemIds": []}
@@ -149,11 +153,13 @@ class GooglePhotosClient:
     def __search_items(self, field):
         medias = []
         next_page_token = ''
+        logger.info('Searching google photos for: %s' % field)
+        ts_log_progress = datetime.now()
         while True:
             search = {'pageSize': 100,
                       'pageToken': next_page_token}
             search.update(field)
-            media_list = self.service.mediaItems().search(body=search).execute()
+            media_list = self.service.mediaItems().search(body=search).execute(num_retries=MAX_API_RETRIES)
 
             if 'mediaItems' not in media_list:
                 break
@@ -165,6 +171,11 @@ class GooglePhotosClient:
                 break
 
             next_page_token = media_list['nextPageToken']
+
+            # Print progress every 60s
+            if (datetime.now() - ts_log_progress).total_seconds() > 60:
+                logger.info('Found %i items so far' % len(medias))
+                ts_log_progress = datetime.now()
 
         logger.info('Found %i items while searching google photos' % len(medias))
         return medias
@@ -194,7 +205,7 @@ class GooglePhotosClient:
         medias = []
         next_page_token = ''
         while True:
-            media_list = self.service.mediaItems().list(pageSize=50, pageToken=next_page_token).execute()
+            media_list = self.service.mediaItems().list(pageSize=50, pageToken=next_page_token).execute(num_retries=MAX_API_RETRIES)
 
             if 'mediaItems' not in media_list:
                 break
@@ -212,5 +223,5 @@ class GooglePhotosClient:
 
     def list_albums(self):
         results = self.service.albums().list(
-            pageSize=50, fields="nextPageToken,albums(id,title)").execute()
+            pageSize=50, fields="nextPageToken,albums(id,title)").execute(num_retries=MAX_API_RETRIES)
         return results.get('albums', [])
