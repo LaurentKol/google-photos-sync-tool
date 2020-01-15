@@ -137,6 +137,7 @@ class PhotosSync:
                     else:
                         return dt_with_tz
 
+                # TODO: Move this in a function
                 if 'SubSecDateTimeOriginal' in exif_data:
                     creation_time = datetime.strptime(__tz_normalizer(exif_data["EXIF:SubSecDateTimeOriginal"]), '%Y:%m:%d %H:%M:%S%z')
                     # In case next photo has no TZ info, fallback to previous photo's TZ (not great but better than assuming UTC)
@@ -283,9 +284,10 @@ class PhotosSync:
             if not local_photos_in_album:
                 logger.info(f"There are no local photos that should be in {album_name}, skipping ...")
                 continue
+            else:
+                logger.info(f"There are local photos in {album_name}, searching google photos ...")
 
             oldest_photo, newest_photo = min(local_photos_in_album), max(local_photos_in_album)
-            # oldest_photo = oldest_photo.creationTime - timedelta(days=1)  # HACK: some pics taken abroad have wrong timezone in exifdata but google photos override with correct timezone.
             logger.debug(f"Oldest local photo in matching album config was taken at {oldest_photo.creationTime} ({oldest_photo.short_file_path}) and newest at {newest_photo.creationTime} ({newest_photo.short_file_path}).")
 
             photos_in_album = set()
