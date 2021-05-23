@@ -14,7 +14,7 @@ pipreqs==0.4.9
 pyasn1==0.4.7
 pyasn1-modules==0.2.7
 PyExifTool==0.1.1
-PyYAML==5.1.2
+PyYAML==5.4
 reorder-python-imports==1.8.0
 requests==2.22.0
 rsa==4.7
