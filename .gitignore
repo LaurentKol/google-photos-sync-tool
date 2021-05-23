@@ -1,0 +1,8 @@
+venv/
+.idea/
+src/*.egg-info/
+*.pyc
+*.pyo
+credentials.json
+python-script-non-web-cred.json
+albums.yaml
