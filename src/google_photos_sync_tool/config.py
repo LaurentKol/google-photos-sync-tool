@@ -13,6 +13,8 @@ import yaml
 ALBUM_CONFIG_FILE = 'albums.yaml'
 # CONTRIBUTOR_NAME is used if shared album have items that are uploaded by other users and need to be excluded from the sync
 CONTRIBUTOR_NAME = '<name shown on photos in shared album>'
+# Used if exifdata does not contain timezone info. You'll see a warning if this is used.
+FALLBACK_TZ = +2
 
 # This is used to shorten file path which is used as photos identifier (it's human readable and does not change when exifdata gets modified).
 # Not using full path allows changing photos' basedir and hides full path from Google Photos ("filename" field).

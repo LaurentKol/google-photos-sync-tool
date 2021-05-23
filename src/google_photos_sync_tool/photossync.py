@@ -26,7 +26,7 @@ from pprint import pformat
 
 import exiftool
 
-from google_photos_sync_tool.config import FILE_PATH_SHORTENING_REGEX
+from google_photos_sync_tool.config import FILE_PATH_SHORTENING_REGEX, FALLBACK_TZ
 from google_photos_sync_tool.photo import Photo
 from google_photos_sync_tool.googlephotosclient import GooglePhotosClient
 
@@ -43,6 +43,8 @@ class PhotosSync:
         self.local_photos_exif_data = []
         self.photos_to_upload_per_albums = {}
         self.photos_to_upload = set()
+        self.oldest_photo = None
+        self.newest_photo = None
 
     def list_local_photos(self, path):
         logger.debug('Listing local photos in %s ... ' % path)
@@ -78,6 +80,18 @@ class PhotosSync:
         logger.info('Done retrieving exif data of {2} photos in {0:.2f}s ({1:.3f}s per photo)'.format(td, (td / len(self.local_photos)), len(self.local_photos_exif_data)))
         return
 
+    def find_oldest_and_newest_photo_from_loaded_exif_data(self):
+        oldest_photo_dt, newest_photo_dt = None, None
+        last_processed_photo_tz = None
+        for exif_data in self.local_photos_exif_data:
+            # Trying to be smart about timezone cause problem when converting creation for items retrieved from google photo (if stored without exifdata)
+            photo_taken_datetime, last_processed_photo_tz = self.__get_photo_taken_datetime(exif_data, last_processed_photo_tz)
+            if not oldest_photo_dt or oldest_photo_dt > photo_taken_datetime:
+                oldest_photo_dt = photo_taken_datetime
+            if not newest_photo_dt or newest_photo_dt < photo_taken_datetime:
+                newest_photo_dt = photo_taken_datetime
+        return oldest_photo_dt, newest_photo_dt
+
     @staticmethod
     def __normalize_to_list(obj):
         return obj if isinstance(obj, list) else [obj]
@@ -89,6 +103,38 @@ class PhotosSync:
             if not any(regexp.match(kw) for kw in keywords):
                 return False
         return True
+
+    @staticmethod
+    def __get_photo_taken_datetime(exif_data, fallback_tz):
+        # Timezone is not always in exif_data, in these cases, use fallback_tz.
+
+        # I tz parsing got fixed in 3.7, to check and remove this if dropping support for python<3.7
+        def __tz_normalizer(dt_with_tz):
+            if ":" == dt_with_tz[-3:-2]:
+                return dt_with_tz[:-3]+dt_with_tz[-2:]
+            else:
+                return dt_with_tz
+
+        if 'SubSecDateTimeOriginal' in exif_data:
+            photo_taken_datetime = datetime.strptime(__tz_normalizer(exif_data["EXIF:SubSecDateTimeOriginal"]), '%Y:%m:%d %H:%M:%S%z')
+            tz = photo_taken_datetime.tzinfo  # Store in case next photo has no TZ info as fallback.
+        elif 'EXIF:DateTimeOriginal' and 'EXIF:OffsetTimeOriginal' in exif_data:
+            photo_taken_datetime = datetime.strptime(exif_data["EXIF:DateTimeOriginal"] + __tz_normalizer(exif_data["EXIF:OffsetTimeOriginal"]), '%Y:%m:%d %H:%M:%S%z')
+            tz = photo_taken_datetime.tzinfo
+        elif 'EXIF:DateTimeOriginal' in exif_data and fallback_tz:
+            photo_taken_datetime = datetime.strptime(exif_data["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S').replace(tzinfo=fallback_tz)
+            logger.warning(f"Could not find timezone information for {exif_data['SourceFile']}, defaulting to last processed photos ({str(fallback_tz)}), assuming creation_time: {photo_taken_datetime}")
+            tz = fallback_tz
+        elif 'EXIF:DateTimeOriginal' in exif_data:
+            photo_taken_datetime = datetime.strptime(exif_data["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S').replace(tzinfo=timezone(timedelta(hours=FALLBACK_TZ)))
+            logger.warning(f"Could not find timezone information for {exif_data['SourceFile']} using FALLBACK_TZ from config ({FALLBACK_TZ}), creation_time: {photo_taken_datetime}")
+            logger.warning(f"You can manually set timezone with: exiftool -preserve -overwrite_original -if 'not $offsettimeoriginal' -offsettimeoriginal='+XX:00' {exif_data['SourceFile']}")
+            tz = None
+        else:
+            logger.critical(f"{exif_data['SourceFile']} has no EXIF:DateTimeOriginal tag. Rather not continue without reasonably reliable way to determine photo's creation time. Exiting ...")
+            sys.exit(1)  # TODO: raise exception
+
+        return photo_taken_datetime, tz
 
     def match_local_photos_to_albums(self, config):
         logger.debug("albumsMapping: %s" % pformat(config.albums_mapping))
@@ -108,7 +154,7 @@ class PhotosSync:
 
             # For each photo, check if belongs to album.
             photos_to_upload_per_albums[album_name] = set()
-            previous_photo_tz = None
+            last_processed_photo_tz = None
             for exif_data in self.local_photos_exif_data:
                 # Go to next photo if its file path doesn't match albums_mapping defined in ALBUM_CONFIG_FILE.
                 photo_file_path = re.sub(FILE_PATH_SHORTENING_REGEX, '', exif_data["SourceFile"])
@@ -127,38 +173,11 @@ class PhotosSync:
                 if 'KeywordsExcl' in regexps and self.__match_all(exif_kws, regexps['KeywordsExcl']):
                     continue
 
-                # If we reached here, this photo belongs to album_name.
-                # First try to determine UTC time.
-
-                # I think this is fixed in 3.7, to check
-                def __tz_normalizer(dt_with_tz):
-                    if ":" == dt_with_tz[-3:-2]:
-                        return dt_with_tz[:-3]+dt_with_tz[-2:]
-                    else:
-                        return dt_with_tz
-
-                # TODO: Move this in a function
-                if 'SubSecDateTimeOriginal' in exif_data:
-                    creation_time = datetime.strptime(__tz_normalizer(exif_data["EXIF:SubSecDateTimeOriginal"]), '%Y:%m:%d %H:%M:%S%z')
-                    # In case next photo has no TZ info, fallback to previous photo's TZ (not great but better than assuming UTC)
-                    previous_photo_tz = creation_time.tzinfo
-                elif 'EXIF:DateTimeOriginal' and 'EXIF:OffsetTimeOriginal' in exif_data:
-                    creation_time = datetime.strptime(exif_data["EXIF:DateTimeOriginal"] + __tz_normalizer(exif_data["EXIF:OffsetTimeOriginal"]), '%Y:%m:%d %H:%M:%S%z')
-                    previous_photo_tz = creation_time.tzinfo
-                elif 'EXIF:DateTimeOriginal' in exif_data and previous_photo_tz:
-                    creation_time = datetime.strptime(exif_data["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S').replace(tzinfo=previous_photo_tz)
-                    logger.warn(f"Could not find timezone information for {exif_data['SourceFile']}, defaulting to previous photos ({str(previous_photo_tz)}), assuming creation_time: {creation_time}")
-                elif 'EXIF:DateTimeOriginal' in exif_data:
-                    creation_time = datetime.strptime(exif_data["EXIF:DateTimeOriginal"], '%Y:%m:%d %H:%M:%S').replace(tzinfo=timezone(timedelta(hours=+2)))
-                    logger.warn(f"Could not find timezone information for {exif_data['SourceFile']} assuming +2 JST (most likely incorrect), assuming creation_time: {creation_time}")
-                    logger.warn(f"You can manually set timezone with: exiftool -preserve -overwrite_original -if 'not $offsettimeoriginal' -offsettimeoriginal='+XX:00' {exif_data['SourceFile']}")
-                else:
-                    logger.critical(f"{exif_data['SourceFile']} has no EXIF:DateTimeOriginal tag. Rather not continue without reasonably reliable way to determine photo's creation time. Exiting ...")
-                    sys.exit(1)
-
+                # If we reached here, this photo belongs to album_name, get it's TZ and add it to 'photos_to_upload_per_albums'
+                photo_taken_datetime, last_processed_photo_tz = self.__get_photo_taken_datetime(exif_data, last_processed_photo_tz)
                 photos_to_upload_per_albums[album_name].add(
                     Photo(file_path=exif_data["SourceFile"],
-                          creationTime=creation_time,
+                          creationTime=photo_taken_datetime,
                           keywords=exif_data["IPTC:Keywords"]))
 
         logger.debug("photosToUploadPerAlbums: %s" % pformat(photos_to_upload_per_albums))
@@ -183,12 +202,11 @@ class PhotosSync:
                 googleDescription=i.get('description', None),
                 googleMetadata=i['mediaMetadata']))
 
-    def __search_google_photos_for_photos_to_upload_time_range(self):
+    def __search_google_photos_for_photos_already_uploaded(self):
         self.photos_already_uploaded = set()
         if not self.photos_to_upload:
             return  # In case no photos are to upload, don't query Google Photo API
         oldest_photo, newest_photo = min(self.photos_to_upload), max(self.photos_to_upload)
-        #oldest_photo = oldest_photo.creationTime - timedelta(days=1)  # HACK: some pics taken abroad have wrong timezone in exifdata but google photos override with correct timezone.
         logger.info('Listing google photos from %s to %s' % (oldest_photo.creationTime, newest_photo.creationTime))
         for i in self.google_photos_client.search_items_by_date_range(oldest_photo.creationTime, newest_photo.creationTime):
             self.photos_already_uploaded.add(Photo(
@@ -212,7 +230,7 @@ class PhotosSync:
 
     def upload_photos(self, pretend=False):
         #self.__list_google_photos()  # This list all google photos  # Used this before, but it's too long to list all google photos
-        self.__search_google_photos_for_photos_to_upload_time_range()  # This list all google photos for time range
+        self.__search_google_photos_for_photos_already_uploaded()  # This list all google photos for time range
         self.__copy_google_id_to_photos_to_upload_per_albums(self.photos_already_uploaded)
 
         # Only upload photos that are not already on GooglePhotos (using short_file_path as comparator)
@@ -276,6 +294,9 @@ class PhotosSync:
         if not self.google_photos_albums:
             self.__list_google_albums()
 
+        oldest_photo_dt, newest_photo_dt = self.find_oldest_and_newest_photo_from_loaded_exif_data()
+        logger.debug(f"Oldest local photo in matching album config was taken at {oldest_photo_dt} and newest at {newest_photo_dt}.")
+
         for album_name in self.photos_to_upload_per_albums.keys():
             album_id = self.__get_album_id(album_name, pretend)
             logger.debug('Album %s is %s' % (album_name, album_id))
@@ -287,8 +308,9 @@ class PhotosSync:
             else:
                 logger.info(f"There are local photos in {album_name}, searching google photos ...")
 
-            oldest_photo, newest_photo = min(local_photos_in_album), max(local_photos_in_album)
-            logger.debug(f"Oldest local photo in matching album config was taken at {oldest_photo.creationTime} ({oldest_photo.short_file_path}) and newest at {newest_photo.creationTime} ({newest_photo.short_file_path}).")
+            # That's wrong, we need to check all photos scanned and not only oldest/newest matching album
+            # because if oldest/newest doesn't belong to album anymore it does not get removed.
+            #oldest_photo, newest_photo = min(local_photos_in_album), max(local_photos_in_album)
 
             photos_in_album = set()
             for i in self.google_photos_client.search_items_by_album(album_id):
@@ -301,13 +323,14 @@ class PhotosSync:
                         logger.error(f"Unknown time format '{i['mediaMetadata']['creationTime']}' of {i}, skipping ...")
                         continue
 
-                logger.debug(f"Looking at remote photo {i['filename']} taken at '{photo_ct}' (raw_ct:{i['mediaMetadata']['creationTime']}) if between {oldest_photo.creationTime} and {newest_photo.creationTime}")
-                if oldest_photo.creationTime <= photo_ct <= newest_photo.creationTime:
+                logger.debug(f"Looking at remote photo {i['filename']} taken at '{photo_ct}' (raw_ct:{i['mediaMetadata']['creationTime']}) if between {oldest_photo_dt} and {newest_photo_dt}")
+                if oldest_photo_dt <= photo_ct <= newest_photo_dt:
                     photos_in_album.add(Photo(
                         googleId=i['id'],
                         short_file_path=i['filename'],
                         googleDescription=i.get('description', None),
                         googleMetadata=i['mediaMetadata']))
+                    logger.debug(f"Adding {i['filename']} to album__")
 
             logger.debug('in-google-album vs in-local-album: %s VS %s' % (photos_in_album, local_photos_in_album))
             photos_to_remove_from_album = photos_in_album - local_photos_in_album
