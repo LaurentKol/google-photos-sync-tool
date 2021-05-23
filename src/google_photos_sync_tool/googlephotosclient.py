@@ -240,6 +240,16 @@ class GooglePhotosClient:
         return medias
 
     def list_albums(self):
-        results = self.service.albums().list(
-            pageSize=50, fields="nextPageToken,albums(id,title)").execute(num_retries=MAX_API_RETRIES)
-        return results.get('albums', [])
+        albums = []
+        next_page_token = ''
+        while True:
+            results = self.service.albums().list(
+                pageSize=50, pageToken=next_page_token, fields="nextPageToken,albums(id,title)").execute(num_retries=MAX_API_RETRIES)
+            if 'albums' not in results:
+                break
+            albums += results['albums']
+            logger.debug('Got %i more albums while listing albums, total: %i' % (len(results['albums']), len(albums)))
+            if 'nextPageToken' not in results:
+                break
+            next_page_token = results['nextPageToken']
+        return albums
