@@ -1,7 +1,7 @@
 aspy.refactor-imports==1.1.0
 cached-property==1.5.1
 cachetools==3.1.1
-certifi==2019.9.11
+certifi==2022.12.7
 chardet==3.0.4
 docopt==0.6.2
 google-api-python-client==1.7.11
